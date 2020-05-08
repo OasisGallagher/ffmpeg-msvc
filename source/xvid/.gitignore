@@ -1,0 +1,11 @@
+*.a
+*.o
+config.status
+platform.inc
+*.log
+config.guess
+config.sub
+configure
+install-sh
+confdefs.h
+conftest.*

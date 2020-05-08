@@ -1,0 +1,366 @@
+diff --git a/lib/accelerated/x86/x86-common.c b/lib/accelerated/x86/x86-common.c
+index 516d6776c..20f572184 100644
+--- a/lib/accelerated/x86/x86-common.c
++++ b/lib/accelerated/x86/x86-common.c
+@@ -40,6 +40,35 @@
+ #include <aes-padlock.h>
+ #ifdef HAVE_CPUID_H
+ # include <cpuid.h>
++#elif defined(_MSC_VER)
++#define HAVE_GET_CPUID_COUNT
++#include <intrin.h>
++static __inline int
++__get_cpuid(unsigned int __leaf,
++	unsigned int* __eax, unsigned int* __ebx,
++	unsigned int* __ecx, unsigned int* __edx)
++{
++	int regs[4];
++	__cpuid(regs, __leaf);
++	*__eax = (uint32_t)regs[0];
++	*__ebx = (uint32_t)regs[1];
++	*__ecx = (uint32_t)regs[2];
++	*__edx = (uint32_t)regs[3];
++	return 1;
++}
++static __inline int
++__get_cpuid_count(unsigned int __leaf, unsigned int __subleaf,
++	unsigned int* __eax, unsigned int* __ebx,
++	unsigned int* __ecx, unsigned int* __edx)
++{
++	int regs[4];
++	__cpuidex(regs, __leaf, __subleaf);
++	*__eax = (uint32_t)regs[0];
++	*__ebx = (uint32_t)regs[1];
++	*__ecx = (uint32_t)regs[2];
++	*__edx = (uint32_t)regs[3];
++	return 1;
++}
+ #else
+ # define __get_cpuid(...) 0
+ # define __get_cpuid_count(...) 0
+diff --git a/lib/debug.c b/lib/debug.c
+index 166dd61ca..bb81ddce4 100644
+--- a/lib/debug.c
++++ b/lib/debug.c
+@@ -31,7 +31,11 @@
+ void _gnutls_dump_mpi(const char *prefix, bigint_t a)
+ {
+ 	char buf[400];
++#if defined(_MSC_VER)
++	char* buf_hex = (char*)_alloca((2 * sizeof(buf) + 1) * sizeof(char));
++#else
+ 	char buf_hex[2 * sizeof(buf) + 1];
++#endif
+ 	size_t n = sizeof buf;
+ 
+ 	if (_gnutls_mpi_print(a, buf, &n))
+@@ -44,7 +48,11 @@ void _gnutls_dump_mpi(const char *prefix, bigint_t a)
+ void
+ _gnutls_dump_vector(const char *prefix, const uint8_t * a, size_t a_size)
+ {
++#if defined(_MSC_VER)
++	char * buf_hex = (char *)_alloca((2 * a_size + 1)*sizeof(char));
++#else
+ 	char buf_hex[2 * a_size + 1];
++#endif
+ 
+ 	_gnutls_debug_log("Vector: length: %d\n\t%s%s\n", (int) a_size,
+ 			  prefix, _gnutls_bin2hex(a, a_size, buf_hex,
+diff --git a/lib/global.c b/lib/global.c
+index 334148342..878444f2b 100644
+--- a/lib/global.c
++++ b/lib/global.c
+@@ -46,11 +46,32 @@
+ #ifdef __sun
+ # pragma fini(lib_deinit)
+ # pragma init(lib_init)
+-# define _CONSTRUCTOR
+-# define _DESTRUCTOR
++# define CONSTRUCTOR_ATTRIBUTE(_func) static void _func(void);
++# define DESTRUCTOR_ATTRIBUTE(_func) static void _func(void);
++#elif defined(_WIN32) && defined(_MSC_VER)
++# define CONSTRUCTOR_ATTRIBUTE_(_func,p) static void _func(void); \
++	static int _func ## _wrapper(void) { _func(); return 0; } \
++	__pragma(section(".CRT$XCU",read)) \
++	__declspec(allocate(".CRT$XCU")) int (* _func##_)(void) = _func ## _wrapper; \
++	__pragma(comment(linker,"/include:" p #_func "_"))
++#ifdef _WIN64
++# define CONSTRUCTOR_ATTRIBUTE(f) CONSTRUCTOR_ATTRIBUTE_(f,"")
+ #else
+-# define _CONSTRUCTOR __attribute__((constructor))
+-# define _DESTRUCTOR __attribute__((destructor))
++# define CONSTRUCTOR_ATTRIBUTE(f) CONSTRUCTOR_ATTRIBUTE_(f,"_")
++#endif
++# define DESTRUCTOR_ATTRIBUTE_(_func,p) static void _func(void); \
++	static int _func ## _constructor(void) { atexit (_func); return 0; } \
++	__pragma(section(".CRT$XCU",read)) \
++	__declspec(allocate(".CRT$XCU")) int (* _func##_)(void) = _func ## _constructor; \
++	__pragma(comment(linker,"/include:" p #_func "_"))
++#ifdef _WIN64
++#define DESTRUCTOR_ATTRIBUTE(f) DESTRUCTOR_ATTRIBUTE_(f,"")
++#else
++#define DESTRUCTOR_ATTRIBUTE(f) DESTRUCTOR_ATTRIBUTE_(f,"_")
++#endif
++#else
++# define CONSTRUCTOR_ATTRIBUTE(_func) static void _func(void) __attribute__((constructor))
++# define DESTRUCTOR_ATTRIBUTE(_func) static void _func(void) __attribute__((destructor))
+ #endif
+ 
+ #ifndef _WIN32
+@@ -493,7 +514,8 @@ const char *gnutls_check_version(const char *req_version)
+ 	return NULL;
+ }
+ 
+-static void _CONSTRUCTOR lib_init(void)
++CONSTRUCTOR_ATTRIBUTE(lib_init);
++static void lib_init(void)
+ {
+ int ret;
+ const char *e;
+@@ -515,7 +537,8 @@ const char *e;
+ 	}
+ }
+ 
+-static void _DESTRUCTOR lib_deinit(void)
++DESTRUCTOR_ATTRIBUTE(lib_deinit);
++static void lib_deinit(void)
+ {
+ 	const char *e;
+ 
+diff --git a/lib/includes/gnutls/gnutls.h.in b/lib/includes/gnutls/gnutls.h.in
+index d8464c94d..f9a7d58ab 100644
+--- a/lib/includes/gnutls/gnutls.h.in
++++ b/lib/includes/gnutls/gnutls.h.in
+@@ -38,7 +38,12 @@
+ #define GNUTLS_H
+ 
+ /* Get ssize_t. */
++#ifdef _MSC_VER
++#include <BaseTsd.h>
++typedef SSIZE_T ssize_t;
++#else
+ #include <sys/types.h>
++#endif
+ 
+ /* Get size_t. */
+ #include <stddef.h>
+diff --git a/lib/nettle/sysrng-windows.c b/lib/nettle/sysrng-windows.c
+index 9d38e67ec..175a528bd 100644
+--- a/lib/nettle/sysrng-windows.c
++++ b/lib/nettle/sysrng-windows.c
+@@ -50,16 +50,30 @@
+ 
+ get_entropy_func _rnd_get_system_entropy = NULL;
+ 
++#if defined(WINAPI_FAMILY_PARTITION) && WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP) && !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
++ #define WINRT
++ static BCRYPT_ALG_HANDLE device_fd = 0;
++#else
+ static HCRYPTPROV device_fd = 0;
++#endif
+ 
+ static
+ int _rnd_get_system_entropy_win32(void* rnd, size_t size)
+ {
++#ifdef WINRT
++	NTSTATUS status;
++	if (!BCRYPT_SUCCESS(status = BCryptGenRandom(device_fd, rnd, (ULONG)size, 0))) {
++		_gnutls_debug_log("Error in BCryptGenRandom: %s\n",
++						  status);
++		return GNUTLS_E_RANDOM_DEVICE_ERROR;
++	}
++#else
+ 	if (!CryptGenRandom(device_fd, (DWORD) size, rnd)) {
+ 		_gnutls_debug_log("Error in CryptGenRandom: %d\n",
+ 					(int)GetLastError());
+ 		return GNUTLS_E_RANDOM_DEVICE_ERROR;
+ 	}
++#endif 
+ 
+ 	return 0;
+ }
+@@ -71,6 +85,14 @@ int _rnd_system_entropy_check(void)
+ 
+ int _rnd_system_entropy_init(void)
+ {
++#ifdef WINRT
++	NTSTATUS status;
++	if (!BCRYPT_SUCCESS(status = BCryptOpenAlgorithmProvider(&device_fd, BCRYPT_RNG_ALGORITHM, NULL, 0))) {
++		_gnutls_debug_log("error in BCryptOpenAlgorithmProvider: %s\n",
++						  status);
++		return GNUTLS_E_RANDOM_DEVICE_ERROR;
++	}
++#else
+ 	if (!CryptAcquireContext
+ 		(&device_fd, NULL, NULL, PROV_RSA_FULL,
+ 		 CRYPT_SILENT | CRYPT_VERIFYCONTEXT)) {
+@@ -78,6 +100,7 @@ int _rnd_system_entropy_init(void)
+ 			("error in CryptAcquireContext!\n");
+ 		return GNUTLS_E_RANDOM_DEVICE_ERROR;
+ 	}
++#endif
+ 
+ 	_rnd_get_system_entropy = _rnd_get_system_entropy_win32;
+ 	return 0;
+@@ -85,5 +108,9 @@ int _rnd_system_entropy_init(void)
+ 
+ void _rnd_system_entropy_deinit(void)
+ {
++#ifdef WINRT
++	BCryptCloseAlgorithmProvider(device_fd, 0);
++#else
+ 	CryptReleaseContext(device_fd, 0);
++#endif
+ }
+diff --git a/lib/system/fastopen.c b/lib/system/fastopen.c
+index 8d8409e48..6b0fa7d49 100644
+--- a/lib/system/fastopen.c
++++ b/lib/system/fastopen.c
+@@ -26,7 +26,9 @@
+ #include "errors.h"
+ 
+ #include <sys/socket.h>
++#ifndef _MSC_VER
+ #include <netinet/in.h> /* IPPROTO_TCP */
++#endif
+ #include <errno.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+diff --git a/lib/system/keys-win.c b/lib/system/keys-win.c
+index 678a668e4..d881681ca 100644
+--- a/lib/system/keys-win.c
++++ b/lib/system/keys-win.c
+@@ -45,8 +45,6 @@
+ #include <winbase.h>
+ #include <winapifamily.h>
+ 
+-#define DYN_NCRYPT
+-
+ #ifdef __MINGW32__
+ # include <_mingw.h>
+ # ifdef __MINGW64_VERSION_MAJOR
+@@ -76,6 +74,12 @@ typedef struct _BCRYPT_PKCS1_PADDING_INFO {
+ # include <ncrypt.h>
+ #endif
+ 
++#if defined(WINAPI_FAMILY_PARTITION) && WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP) && !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
++#define WINRT
++#else
++#define DYN_NCRYPT
++#endif
++
+ // MinGW headers may not have these defines
+ #ifndef NCRYPT_SHA1_ALGORITHM
+ #define NCRYPT_SHA1_ALGORITHM	   BCRYPT_SHA1_ALGORITHM
+@@ -110,8 +114,10 @@ struct system_key_iter_st {
+ };
+ 
+ typedef struct priv_st {
++#ifndef WINRT
+ 	DWORD dwKeySpec;	/* CAPI key */
+ 	HCRYPTPROV hCryptProv;	/* CAPI keystore */
++#endif
+ 	NCRYPT_KEY_HANDLE nc;	/* CNG Keystore */
+ 	gnutls_pk_algorithm_t pk;
+ 	gnutls_sign_algorithm_t sign_algo;
+@@ -177,6 +183,7 @@ static NCryptGetPropertyFunc pNCryptGetProperty;
+ static NCryptFreeObjectFunc pNCryptFreeObject;
+ static NCryptDecryptFunc pNCryptDecrypt;
+ static NCryptSignHashFunc pNCryptSignHash;
++static HMODULE ncrypt_lib;
+ #else
+ #define pNCryptDeleteKey NCryptDeleteKey
+ #define pNCryptOpenStorageProvider NCryptOpenStorageProvider
+@@ -188,7 +195,6 @@ static NCryptSignHashFunc pNCryptSignHash;
+ #endif
+ 
+ static unsigned ncrypt_init = 0;
+-static HMODULE ncrypt_lib;
+ 
+ #define WIN_URL SYSTEM_URL"win:"
+ #define WIN_URL_SIZE 11
+@@ -248,6 +254,7 @@ void *memrev(unsigned char *pvData, DWORD cbData)
+ 	return pvData;
+ }
+ 
++#ifndef WINRT
+ static
+ int capi_sign(gnutls_privkey_t key, void *userdata,
+ 	      const gnutls_datum_t * raw_data, gnutls_datum_t * signature)
+@@ -436,6 +443,7 @@ static int capi_info(gnutls_privkey_t key, unsigned int flags, void *userdata)
+ 		return priv->sign_algo;
+ 	return -1;
+ }
++#endif
+ 
+ static
+ int cng_sign(gnutls_privkey_t key, void *userdata,
+@@ -613,7 +621,7 @@ static int cng_info(gnutls_privkey_t key, unsigned int flags, void *userdata)
+  -*/
+ int _gnutls_privkey_import_system_url(gnutls_privkey_t pkey, const char *url)
+ {
+-#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_APP)
++#ifdef WINRT
+     return gnutls_assert_val(GNUTLS_E_UNIMPLEMENTED_FEATURE);
+ #else
+ 	uint8_t id[MAX_WID_SIZE];
+@@ -1428,9 +1436,9 @@ int gnutls_system_key_add_x509(gnutls_x509_crt_t crt,
+ 
+ int _gnutls_system_key_init(void)
+ {
++#ifdef DYN_NCRYPT
+ 	int ret;
+ 
+-#ifdef DYN_NCRYPT
+ 	ncrypt_lib = LoadLibrary(TEXT("ncrypt.dll"));
+ 	if (ncrypt_lib == NULL) {
+ 		return gnutls_assert_val(GNUTLS_E_CRYPTO_INIT_FAILED);
+@@ -1491,15 +1499,19 @@ int _gnutls_system_key_init(void)
+ 	ncrypt_init = 1;
+ 
+ 	return 0;
++#ifdef DYN_NCRYPT
+  fail:
+ 	FreeLibrary(ncrypt_lib);
+ 	return ret;
++#endif
+ }
+ 
+ void _gnutls_system_key_deinit(void)
+ {
+ 	if (ncrypt_init != 0) {
++#ifdef DYN_NCRYPT
+ 		FreeLibrary(ncrypt_lib);
++#endif
+ 		ncrypt_init = 0;
+ 	}
+ }
+diff --git a/lib/x509/hostname-verify.c b/lib/x509/hostname-verify.c
+index 967d9b821..6eaed3c20 100644
+--- a/lib/x509/hostname-verify.c
++++ b/lib/x509/hostname-verify.c
+@@ -26,8 +26,10 @@
+ #include <common.h>
+ #include "errors.h"
+ #include <system.h>
++#ifndef _MSC_VER
+ #include <netinet/in.h>
+ #include <arpa/inet.h>
++#endif
+ 
+ /**
+  * gnutls_x509_crt_check_hostname:
+diff --git a/lib/x509/ip.c b/lib/x509/ip.c
+index c4cb00831..a3be0d2b0 100644
+--- a/lib/x509/ip.c
++++ b/lib/x509/ip.c
+@@ -24,7 +24,9 @@
+ #include "gnutls_int.h"
+ #include "ip.h"
+ #include <gnutls/x509.h>
++#ifndef _MSC_VER
+ #include <arpa/inet.h>
++#endif
+ 
+ /*-
+  * _gnutls_mask_to_prefix:

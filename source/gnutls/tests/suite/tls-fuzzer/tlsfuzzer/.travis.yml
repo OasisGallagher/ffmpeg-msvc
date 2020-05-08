@@ -1,0 +1,112 @@
+language: python
+
+python:
+  - 2.6
+  - 2.7
+  - 3.2
+  - 3.3
+  - 3.4
+  - 3.5
+  - 3.6
+  - 3.7
+
+# workaround for 3.7 not available in default configuration
+# travis-ci/travis-ci#9815
+dist: trusty
+sudo: false
+
+matrix:
+ exclude:
+   - python: 3.7
+ include:
+# workaround for 3.7 not available in default configuration
+# travis-ci/travis-ci#9815
+   - python: 3.7
+     dist: xenial
+     sudo: true
+
+branches:
+  only:
+    - master
+
+addons:
+  apt_packages:
+    # needed for M2Crypto
+    - swig
+    - libssl-dev
+
+before_install:
+  - |
+       echo -e "TRAVIS_PULL_REQUEST=$TRAVIS_PULL_REQUEST\n" \
+               "TRAVIS_REPO_SLUG=$TRAVIS_REPO_SLUG\n" \
+               "TRAVIS_PULL_REQUEST=$TRAVIS_PULL_REQUEST\n" \
+               "TRAVIS_COMMIT=$TRAVIS_COMMIT\n" \
+               "TRAVIS_PYTHON_VERSION=$TRAVIS_PYTHON_VERSION"
+  - |
+       # workaround https://github.com/travis-ci/travis-ci/issues/2666
+       if [ "$TRAVIS_PULL_REQUEST" != "false" ]; then
+         URL="https://github.com/${TRAVIS_REPO_SLUG}/pull/${TRAVIS_PULL_REQUEST}.patch"
+         # `--location` makes curl follow redirects
+         PR_FIRST=$(curl --silent --show-error --location $URL | head -1 | grep -o -E '\b[0-9a-f]{40}\b' | tr -d '\n')
+         TRAVIS_COMMIT_RANGE=$PR_FIRST^..$TRAVIS_COMMIT
+       fi
+  # sanity check current commit
+  - git rev-parse HEAD
+  - echo "TRAVIS_COMMIT_RANGE=$TRAVIS_COMMIT_RANGE"
+  - git fetch origin master:refs/remotes/origin/master
+  - curl -L https://codeclimate.com/downloads/test-reporter/test-reporter-latest-linux-amd64 > ./cc-test-reporter
+  - chmod +x ./cc-test-reporter
+
+install:
+  - if [[ -e build-requirements-${TRAVIS_PYTHON_VERSION}.txt ]]; then travis_retry pip install -r build-requirements-${TRAVIS_PYTHON_VERSION}.txt; else travis_retry pip install -r build-requirements.txt; fi
+  - travis_retry pip install -r requirements.txt
+  # codeclimate supports natively just one set of results, so use the most recent python for that
+  - if [[ $TRAVIS_PYTHON_VERSION == '3.6' ]]; then ./cc-test-reporter before-build; fi
+
+script:
+  - |
+      if [[ $TRAVIS_PYTHON_VERSION == '2.6' ]]; then
+          coverage run --branch --source tlsfuzzer -m unittest2 discover;
+      else
+          coverage run --branch --source tlsfuzzer -m unittest discover;
+      fi
+  - coverage report -m
+  # check if all scripts are included in the json files
+  - python tests/verify-scripts-json.py tests/tlslite-ng-random-subset.json tests/tlslite-ng.json
+  # the HTTP header includes python version, since "2.7.15" is longer than "2.6.9", the reply itself is longer too
+  - |
+      if [[ $TRAVIS_PYTHON_VERSION == '2.7' ]]; then
+        export REPLY_SIZE=1850
+      else
+        export REPLY_SIZE=1849
+      fi
+  - travis_wait 30 python tests/scripts_retention.py tests/tlslite-ng-random-subset.json `which tls.py` $REPLY_SIZE
+  # pylint doesn't work on 2.6: https://bitbucket.org/logilab/pylint/issue/390/py26-compatiblity-broken
+  # diff-quality doesn't work on 3.2: https://github.com/edx/diff-cover/issues/94
+  - |
+      if [[ $TRAVIS_PYTHON_VERSION != '2.6' ]] && [[ $TRAVIS_PYTHON_VERSION != '3.2' ]]; then
+        pylint --msg-template="{path}:{line}: [{msg_id}({symbol}), {obj}] {msg}" tlsfuzzer > pylint_report.txt || :
+        diff-quality --violations=pylint --fail-under=90 pylint_report.txt
+      fi
+  - |
+      if [[ $TRAVIS_PULL_REQUEST != "false" ]]; then
+        echo "Will test commits between $TRAVIS_COMMIT_RANGE:"
+        git log --oneline --reverse $TRAVIS_COMMIT_RANGE
+
+        for i in $(git log --pretty=format:%H --reverse $TRAVIS_COMMIT_RANGE); do
+          git checkout $i
+          make clean
+          if [[ $TRAVIS_PYTHON_VERSION == '2.6' ]]; then
+            unit2 discover || exit 1
+          else
+            python -m unittest discover || exit 1
+          fi
+          cd $TRAVIS_BUILD_DIR
+        done
+      fi
+
+sudo: false
+
+after_success:
+ - coveralls
+ - if [[ $TRAVIS_PYTHON_VERSION == '3.6' ]]; then coverage xml; ./cc-test-reporter after-build --exit-code $TRAVIS_TEST_RESULT; fi
