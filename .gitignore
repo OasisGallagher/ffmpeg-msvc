@@ -51,3 +51,7 @@
 /msvc/include/x265_config.h
 /msvc/include/x265.h
 /msvc/x64/bin/lib/x64/*.pdb
+/source/FFmpeg/examples/x64
+/msvc/*.ilk
+/msvc/*.pdb
+/msvc/examples.exe
